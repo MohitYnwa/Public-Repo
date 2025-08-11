@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mortgage Dashboard — React</title>
+  <!-- Include React and Plotly from CDNs -->
+  <script crossorigin src="https://unpkg.com/react@17/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.25.2.min.js"></script>
+  <style>
+    /* Dark theme variables */
+    :root {
+      --bg: #0b0f14;
+      --panel: #121821;
+      --ink: #e7eef6;
+      --muted: #9db0c7;
+      --ink-2: #ced8e6;
+      --accent: #7fb0ff;
+      --accent-2: #98e2cf;
+      --accent-3: #ffd48c;
+      --danger: #ff6b6b;
+      --ok: #66d9a3;
+      --line: rgba(255,255,255,0.06);
+    }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .wrap { max-width: 1200px; margin: 22px auto 36px; padding: 0 16px; }
+    h1 { font-size: 22px; margin: 0 0 14px; letter-spacing: .2px; }
+    .sub { color: var(--muted); font-size: 12px; margin-top: -6px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+    .card {
+      background: var(--panel);
+      padding: 14px;
+      border-radius: 14px;
+      box-shadow: 0 0 0 1px var(--line) inset;
+      margin-bottom: 16px;
+    }
+    .card h2 { font-size: 15px; margin: 4px 0 10px; color: var(--ink-2); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+    label { display:block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    input[type="number"], input[type="month"] {
+      width: 100%; padding: 9px 10px; border-radius: 10px; border: 1px solid #223043;
+      background: #0e141c; color: var(--ink); outline: none; font-size: 14px;
+    }
+    /* Style select similar to input */
+    select {
+      width: 100%; padding: 9px 10px; border-radius: 10px; border: 1px solid #223043;
+      background: #0e141c; color: var(--ink); font-size: 14px; appearance: none;
+    }
+    .kpi { display:flex; gap:10px; flex-wrap: wrap; margin-top: 10px; }
+    .pill {
+      background: #0e141c; color: var(--ink-2); border-radius: 999px; padding: 8px 10px; font-size: 12px;
+      box-shadow: 0 0 0 1px var(--line) inset;
+    }
+    .pill b { color: #fff; }
+    .pill.warn { color: var(--danger); }
+    .pill.ok { color: var(--ok); }
+    .btnbar { display:flex; gap:8px; flex-wrap: wrap; }
+    button {
+      background: var(--accent); color:#07121d; font-weight:700; border:0; padding:10px 14px; border-radius:10px; cursor:pointer;
+    }
+    button.secondary { background:#1a2635; color: var(--ink); box-shadow: 0 0 0 1px var(--line) inset; }
+    .chart { width: 100%; height: 320px; }
+    .footer { color: var(--muted); font-size:12px; margin-top: 18px; text-align: right; }
+    /* Additional styles for difference table */
+    table.diff { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    table.diff th, table.diff td { padding: 6px 8px; font-size:12px; }
+    table.diff th { text-align: left; color: var(--ink-2); }
+    table.diff td { color: var(--ink); }
+    table.diff tr:nth-child(odd) { background: #0e141c; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+// Helper functions used for simulation
+function monthAdd(ym, add) {
+  const [y, m] = ym.split('-').map(v => parseInt(v, 10));
+  const d = new Date(y, m - 1 + add, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function monthlyRate(apr) { return (apr / 100) / 12; }
+function getRate(apr1, apr2, after, m) {
+  if (!apr2 || !after) return monthlyRate(apr1);
+  return m > after ? monthlyRate(apr2) : monthlyRate(apr1);
+}
+function simulateLinear(opts) {
+  const { bal0, apr, fixedPrin, targetTotal, startMonth, apr2, rateAfter, maxMonths } = opts;
+  let bal = bal0, i = 0, ym = startMonth; const rows = [];
+  while (bal > 1e-6 && i < maxMonths) {
+    i++;
+    const r = getRate(apr, apr2, rateAfter, i);
+    const interest = bal * r;
+    const schedPrin = Math.min(fixedPrin, bal);
+    const schedTotal = interest + schedPrin;
+    let extra = Math.max(0, targetTotal - schedTotal);
+    extra = Math.min(extra, bal - schedPrin);
+    let totalPrin = schedPrin + extra;
+    if (totalPrin > bal - 1e-8) totalPrin = bal;
+    const payment = interest + totalPrin;
+    const newBal = bal - totalPrin;
+    rows.push({ month: i, ym, open: bal, interest, schedPrin, extra, totalPrin, payment, close: newBal });
+    bal = newBal; ym = monthAdd(ym, 1);
+  }
+  return rows;
+}
+function simulateAnnuity(opts) {
+  const { bal0, apr, monthlyPayment, extra, startMonth, apr2, rateAfter, maxMonths } = opts;
+  let bal = bal0, i = 0, ym = startMonth; const rows = [];
+  while (bal > 1e-6 && i < maxMonths) {
+    i++;
+    const r = getRate(apr, apr2, rateAfter, i);
+    const interest = bal * r;
+    let principal = Math.max(0, (monthlyPayment + extra) - interest);
+    principal = Math.min(principal, bal);
+    const payment = interest + principal;
+    const newBal = bal - principal;
+    rows.push({ month: i, ym, open: bal, interest, principal, payment, close: newBal });
+    bal = newBal; ym = monthAdd(ym, 1);
+  }
+  return rows;
+}
+// React component
+function MortgageDashboard() {
+  const { useState, useEffect, useRef } = React;
+  // Global settings
+  const [startMonth, setStartMonth] = useState('2025-08');
+  const [maxMonths, setMaxMonths] = useState(600);
+  // Currency symbol (EUR by default); can be changed by the user
+  const [currencySymbol, setCurrencySymbol] = useState('€');
+  // Linear mortgage inputs
+  const [linBal, setLinBal] = useState(539380.07);
+  const [linApr, setLinApr] = useState(3.57);
+  const [linFixed, setLinFixed] = useState(1544.99);
+  const [linTarget, setLinTarget] = useState(4150.00);
+  const [linApr2, setLinApr2] = useState('');
+  const [linRateAfter, setLinRateAfter] = useState('');
+  // Annuity mortgage inputs
+  const [annBal, setAnnBal] = useState(346150.99);
+  const [annApr, setAnnApr] = useState(1.46);
+  const [annPmt, setAnnPmt] = useState(1389.42);
+  const [annExtra, setAnnExtra] = useState(0.00);
+  const [annApr2, setAnnApr2] = useState('');
+  const [annRateAfter, setAnnRateAfter] = useState('');
+  // Scenario storage
+  const [scenarioA, setScenarioA] = useState(null);
+  const [scenarioB, setScenarioB] = useState(null);
+  const [showOverlay, setShowOverlay] = useState(false);
+  // Calculation results
+  const [calc, setCalc] = useState({ L: [], A: [], ym: [], linBal: [], annBal: [], totalBal: [], monthlyCash: [], yearlyPrin: [], yearlyInt: [], distPrincipal: 0, distInterest: 0, metrics: {} });
+  // Refs for charts
+  const totalRef = useRef(null);
+  const balancesRef = useRef(null);
+  const cashRef = useRef(null);
+  const yearlyRef = useRef(null);
+  const distRef = useRef(null);
+  const cumRef = useRef(null);
+
+  // Perform simulation whenever inputs change
+  useEffect(() => {
+    const maxM = Math.max(12, Math.min(parseInt(maxMonths || 600, 10), 1200));
+    const L = simulateLinear({
+      bal0: parseFloat(linBal) || 0,
+      apr: parseFloat(linApr) || 0,
+      fixedPrin: parseFloat(linFixed) || 0,
+      targetTotal: parseFloat(linTarget) || 0,
+      startMonth: startMonth,
+      apr2: linApr2 ? parseFloat(linApr2) : null,
+      rateAfter: linRateAfter ? parseInt(linRateAfter, 10) : null,
+      maxMonths: maxM
+    });
+    const A = simulateAnnuity({
+      bal0: parseFloat(annBal) || 0,
+      apr: parseFloat(annApr) || 0,
+      monthlyPayment: parseFloat(annPmt) || 0,
+      extra: parseFloat(annExtra) || 0,
+      startMonth: startMonth,
+      apr2: annApr2 ? parseFloat(annApr2) : null,
+      rateAfter: annRateAfter ? parseInt(annRateAfter, 10) : null,
+      maxMonths: maxM
+    });
+    const maxLen = Math.max(L.length, A.length);
+    const ym = [];
+    const linBalArr = [];
+    const annBalArr = [];
+    const totalBalArr = [];
+    const monthlyCashArr = [];
+    for (let i = 0; i < maxLen; i++) {
+      linBalArr[i] = i < L.length ? L[i].close : (i > 0 ? linBalArr[i - 1] : 0);
+      annBalArr[i] = i < A.length ? A[i].close : (i > 0 ? annBalArr[i - 1] : 0);
+      totalBalArr[i] = (linBalArr[i] || 0) + (annBalArr[i] || 0);
+      const cashL = i < L.length ? L[i].payment : 0;
+      const cashA = i < A.length ? A[i].payment : 0;
+      monthlyCashArr[i] = cashL + cashA;
+      ym[i] = i < L.length ? L[i].ym : (i < A.length ? A[i].ym : startMonth);
+    }
+    // Yearly aggregation
+    const yearlyPrin = [];
+    const yearlyInt = [];
+    for (let i = 0; i < maxLen; i++) {
+      const p = (i < L.length ? (L[i].totalPrin || 0) : 0) + (i < A.length ? (A[i].principal || 0) : 0);
+      const intr = (i < L.length ? (L[i].interest || 0) : 0) + (i < A.length ? (A[i].interest || 0) : 0);
+      const yr = Math.floor(i / 12);
+      yearlyPrin[yr] = (yearlyPrin[yr] || 0) + p;
+      yearlyInt[yr] = (yearlyInt[yr] || 0) + intr;
+    }
+    // Distribution totals
+    const distPrincipal = yearlyPrin.reduce((a, v) => a + v, 0);
+    const distInterest = yearlyInt.reduce((a, v) => a + v, 0);
+
+    // Cumulative principal and interest arrays: running sum of monthly principal and interest
+    const cumPrincipalArr = [];
+    const cumInterestArr = [];
+    let cumP = 0;
+    let cumI = 0;
+    for (let i = 0; i < maxLen; i++) {
+      const p = (i < L.length ? (L[i].totalPrin || 0) : 0) + (i < A.length ? (A[i].principal || 0) : 0);
+      const intr = (i < L.length ? (L[i].interest || 0) : 0) + (i < A.length ? (A[i].interest || 0) : 0);
+      cumP += p;
+      cumI += intr;
+      cumPrincipalArr[i] = cumP;
+      cumInterestArr[i] = cumI;
+    }
+    // Metrics summary
+    const payoffMonths = arr => { let last = 0; for (let i = 0; i < arr.length; i++) if (arr[i] > 1e-6) last = i + 1; return last; };
+    const kLin = { months: payoffMonths(linBalArr), interest: L.reduce((a, r) => a + r.interest, 0), payoffYM: L.length ? L[L.length - 1].ym : '-' };
+    const kAnn = { months: payoffMonths(annBalArr), interest: A.reduce((a, r) => a + r.interest, 0), payoffYM: A.length ? A[A.length - 1].ym : '-' };
+    const kAll = { months: Math.max(kLin.months, kAnn.months), interest: kLin.interest + kAnn.interest, totalPay: monthlyCashArr.reduce((a, v) => a + v, 0) };
+    setCalc({
+      L,
+      A,
+      ym,
+      linBal: linBalArr,
+      annBal: annBalArr,
+      totalBal: totalBalArr,
+      monthlyCash: monthlyCashArr,
+      yearlyPrin,
+      yearlyInt,
+      distPrincipal,
+      distInterest,
+      cumPrincipal: cumPrincipalArr,
+      cumInterest: cumInterestArr,
+      metrics: { kLin, kAnn, kAll }
+    });
+  }, [startMonth, maxMonths, linBal, linApr, linFixed, linTarget, linApr2, linRateAfter, annBal, annApr, annPmt, annExtra, annApr2, annRateAfter]);
+
+  // Update Plotly charts whenever calc or overlay changes
+  useEffect(() => {
+    const styles = getComputedStyle(document.documentElement);
+    const colorAccent = styles.getPropertyValue('--accent').trim();
+    const colorAccent2 = styles.getPropertyValue('--accent-2').trim();
+    const colorAccent3 = styles.getPropertyValue('--accent-3').trim();
+    const colorOk = styles.getPropertyValue('--ok').trim();
+    const colorDanger = styles.getPropertyValue('--danger').trim();
+    const panelColor = styles.getPropertyValue('--panel').trim();
+    const fontColor = styles.getPropertyValue('--ink').trim();
+    const xMonths = calc.totalBal.map((_, i) => i + 1);
+    // Prepare traces for total balance with optional overlay
+    let totalTraces = [
+      { x: xMonths, y: calc.totalBal, type: 'scatter', mode: 'lines', name: 'Total Balance', fill: 'tozeroy', line: { color: colorAccent } }
+    ];
+    let showLegendTotal = false;
+    if (showOverlay && scenarioA && scenarioB) {
+      const overlayX = scenarioA.ym.map((_, i) => i + 1);
+      totalTraces = [
+        { x: xMonths, y: calc.totalBal, type: 'scatter', mode: 'lines', name: 'Current', fill: 'tozeroy', line: { color: colorAccent } },
+        { x: overlayX, y: scenarioA.total, type: 'scatter', mode: 'lines', name: 'Scenario A', line: { color: colorAccent2 } },
+        { x: overlayX, y: scenarioB.total, type: 'scatter', mode: 'lines', name: 'Scenario B', line: { color: colorAccent3 } }
+      ];
+      showLegendTotal = true;
+    }
+    Plotly.react(totalRef.current, totalTraces, {
+      margin: { t: 30, l: 40, r: 20, b: 40 },
+      paper_bgcolor: panelColor,
+      plot_bgcolor: panelColor,
+      font: { color: fontColor },
+      legend: { orientation: 'h', y: -0.25 },
+      showlegend: showLegendTotal,
+      yaxis: { tickprefix: currencySymbol, separatethousands: true }
+    });
+    // Balances by loan stacked area
+    Plotly.react(balancesRef.current, [
+      { x: xMonths, y: calc.linBal, type: 'scatter', mode: 'lines', name: 'Linear', fill: 'tozeroy', line: { color: colorAccent2 } },
+      { x: xMonths, y: calc.annBal, type: 'scatter', mode: 'lines', name: 'Annuity', fill: 'tonexty', line: { color: colorAccent3 } }
+    ], {
+      margin: { t: 30, l: 40, r: 20, b: 40 },
+      paper_bgcolor: panelColor,
+      plot_bgcolor: panelColor,
+      font: { color: fontColor },
+      legend: { orientation: 'h', y: -0.25 },
+      showlegend: true,
+      yaxis: { tickprefix: currencySymbol, separatethousands: true }
+    });
+    // Monthly cash outflow bar chart
+    Plotly.react(cashRef.current, [
+      { x: xMonths, y: calc.monthlyCash, type: 'bar', name: 'Cash Outflow', marker: { color: colorAccent } }
+    ], {
+      margin: { t: 30, l: 40, r: 20, b: 40 },
+      paper_bgcolor: panelColor,
+      plot_bgcolor: panelColor,
+      font: { color: fontColor },
+      showlegend: false,
+      yaxis: { tickprefix: currencySymbol, separatethousands: true }
+    });
+    // Yearly principal vs interest stacked bar
+    const yearLabels = calc.yearlyPrin.map((_, j) => 'Year ' + (j + 1));
+    Plotly.react(yearlyRef.current, [
+      { x: yearLabels, y: calc.yearlyPrin, type: 'bar', name: 'Principal', marker: { color: colorOk } },
+      { x: yearLabels, y: calc.yearlyInt, type: 'bar', name: 'Interest', marker: { color: colorDanger } }
+    ], {
+      barmode: 'stack',
+      margin: { t: 30, l: 40, r: 20, b: 40 },
+      paper_bgcolor: panelColor,
+      plot_bgcolor: panelColor,
+      font: { color: fontColor },
+      legend: { orientation: 'h', y: -0.25 },
+      showlegend: true,
+      yaxis: { tickprefix: currencySymbol, separatethousands: true }
+    });
+    // Distribution pie chart
+    Plotly.react(distRef.current, [
+      { values: [calc.distPrincipal, calc.distInterest], labels: ['Principal', 'Interest'], type: 'pie', name: 'Distribution', marker: { colors: [colorOk, colorDanger] } }
+    ], {
+      margin: { t: 30, l: 40, r: 20, b: 40 },
+      paper_bgcolor: panelColor,
+      plot_bgcolor: panelColor,
+      font: { color: fontColor },
+      legend: { orientation: 'h', y: -0.25 },
+      showlegend: true
+    });
+
+    // Cumulative payments chart: stacked area of cumulative principal and interest
+    Plotly.react(cumRef.current, [
+      { x: xMonths, y: calc.cumPrincipal || [], type: 'scatter', mode: 'lines', name: 'Cumulative Principal', fill: 'tozeroy', line: { color: colorOk } },
+      { x: xMonths, y: calc.cumInterest || [], type: 'scatter', mode: 'lines', name: 'Cumulative Interest', fill: 'tonexty', line: { color: colorDanger } }
+    ], {
+      margin: { t: 30, l: 40, r: 20, b: 40 },
+      paper_bgcolor: panelColor,
+      plot_bgcolor: panelColor,
+      font: { color: fontColor },
+      legend: { orientation: 'h', y: -0.25 },
+      showlegend: true,
+      yaxis: { tickprefix: currencySymbol, separatethousands: true }
+    });
+  }, [calc, scenarioA, scenarioB, showOverlay, currencySymbol]);
+
+  // Helper to format money nicely
+  const fmtMoney = x => currencySymbol + Math.round(x).toLocaleString();
+  const fmtMonths = m => `${m} m (~${(m / 12).toFixed(2)} y)`;
+
+  // Save current scenario
+  const saveScenario = (slot) => {
+    const scenario = {
+      ym: [...calc.ym],
+      total: [...calc.totalBal],
+      metrics: { months: calc.metrics.kAll.months, interest: calc.metrics.kAll.interest }
+    };
+    if (slot === 'A') setScenarioA(scenario);
+    if (slot === 'B') setScenarioB(scenario);
+  };
+  const overlay = () => {
+    if (scenarioA && scenarioB) setShowOverlay(true);
+  };
+  const clearOverlay = () => {
+    setShowOverlay(false);
+  };
+
+  // Difference summary for scenarios
+  const renderDiffTable = () => {
+    if (!scenarioA || !scenarioB) return null;
+    const cur = calc.metrics.kAll;
+    const a = scenarioA.metrics;
+    const b = scenarioB.metrics;
+    const toRow = (label, curVal, aVal, bVal) => {
+      return (
+        React.createElement('tr', { key: label }, [
+          React.createElement('th', null, label),
+          React.createElement('td', null, curVal),
+          React.createElement('td', null, aVal),
+          React.createElement('td', null, bVal)
+        ])
+      );
+    };
+    return (
+      React.createElement('table', { className: 'diff' }, [
+        React.createElement('thead', null, React.createElement('tr', null, [
+          React.createElement('th', null, ''),
+          React.createElement('th', null, 'Current'),
+          React.createElement('th', null, 'Scenario A'),
+          React.createElement('th', null, 'Scenario B')
+        ])),
+        React.createElement('tbody', null, [
+          toRow('Payoff time', fmtMonths(cur.months), fmtMonths(a.months), fmtMonths(b.months)),
+          toRow('Interest total', fmtMoney(cur.interest), fmtMoney(a.interest), fmtMoney(b.interest))
+        ])
+      ])
+    );
+  };
+
+  return (
+    React.createElement('div', { className: 'wrap' }, [
+      React.createElement('h1', null, 'Mortgage Dashboard — React'),
+      React.createElement('div', { className: 'sub' }, 'Explore payoff time, interest, and cash flow. Adjust inputs to see results instantly.'),
+      // Input panels
+      React.createElement('div', { className: 'grid-3', style: { marginTop: '14px' } }, [
+        // Global
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Global'),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Start month'),
+              React.createElement('input', { type: 'month', value: startMonth, onChange: e => setStartMonth(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Max months (cap calc)'),
+              React.createElement('input', { type: 'number', min: 12, max: 1200, value: maxMonths, onChange: e => setMaxMonths(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Currency'),
+              React.createElement('select', { value: currencySymbol, onChange: e => setCurrencySymbol(e.target.value) }, [
+                React.createElement('option', { value: '€' }, 'EUR (€)'),
+                React.createElement('option', { value: '$' }, 'USD ($)'),
+                React.createElement('option', { value: '£' }, 'GBP (£)')
+              ])
+            ]),
+            React.createElement('div', null, null)
+          ]),
+          // KPIs for overall
+          React.createElement('div', { className: 'kpi' }, [
+            React.createElement('span', { className: 'pill' }, ['Last loan paid in: ', React.createElement('b', null, fmtMonths(calc.metrics.kAll?.months || 0))]),
+            React.createElement('span', { className: 'pill' }, ['Combined interest: ', React.createElement('b', null, fmtMoney(calc.metrics.kAll?.interest || 0))]),
+            React.createElement('span', { className: 'pill' }, ['Total paid (both): ', React.createElement('b', null, fmtMoney(calc.metrics.kAll?.totalPay || 0))])
+          ])
+        ]),
+        // Linear mortgage
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Linear mortgage'),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Starting balance'),
+              React.createElement('input', { type: 'number', step: '0.01', value: linBal, onChange: e => setLinBal(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'APR (%)'),
+              React.createElement('input', { type: 'number', step: '0.01', value: linApr, onChange: e => setLinApr(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Fixed principal / month'),
+              React.createElement('input', { type: 'number', step: '0.01', value: linFixed, onChange: e => setLinFixed(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Total you’ll pay / month'),
+              React.createElement('input', { type: 'number', step: '0.01', value: linTarget, onChange: e => setLinTarget(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Rate after N months (%)'),
+              React.createElement('input', { type: 'number', step: '0.01', value: linApr2, onChange: e => setLinApr2(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Apply after month #'),
+              React.createElement('input', { type: 'number', step: '1', value: linRateAfter, onChange: e => setLinRateAfter(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'kpi' }, [
+            React.createElement('span', { className: 'pill' }, ['Payoff: ', React.createElement('b', null, fmtMonths(calc.metrics.kLin?.months || 0))]),
+            React.createElement('span', { className: 'pill' }, ['Payoff date: ', React.createElement('b', null, calc.metrics.kLin?.payoffYM || '-')]),
+            React.createElement('span', { className: 'pill' }, ['Interest total: ', React.createElement('b', null, fmtMoney(calc.metrics.kLin?.interest || 0))])
+          ])
+        ]),
+        // Annuity mortgage
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Annuity mortgage'),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Starting balance'),
+              React.createElement('input', { type: 'number', step: '0.01', value: annBal, onChange: e => setAnnBal(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'APR (%)'),
+              React.createElement('input', { type: 'number', step: '0.01', value: annApr, onChange: e => setAnnApr(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Monthly payment'),
+              React.createElement('input', { type: 'number', step: '0.01', value: annPmt, onChange: e => setAnnPmt(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Extra monthly prepayment'),
+              React.createElement('input', { type: 'number', step: '0.01', value: annExtra, onChange: e => setAnnExtra(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'row' }, [
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Rate after N months (%)'),
+              React.createElement('input', { type: 'number', step: '0.01', value: annApr2, onChange: e => setAnnApr2(e.target.value) })
+            ]),
+            React.createElement('div', null, [
+              React.createElement('label', null, 'Apply after month #'),
+              React.createElement('input', { type: 'number', step: '1', value: annRateAfter, onChange: e => setAnnRateAfter(e.target.value) })
+            ])
+          ]),
+          React.createElement('div', { className: 'kpi' }, [
+            React.createElement('span', { className: 'pill' }, ['Payoff: ', React.createElement('b', null, fmtMonths(calc.metrics.kAnn?.months || 0))]),
+            React.createElement('span', { className: 'pill' }, ['Payoff date: ', React.createElement('b', null, calc.metrics.kAnn?.payoffYM || '-')]),
+            React.createElement('span', { className: 'pill' }, ['Interest total: ', React.createElement('b', null, fmtMoney(calc.metrics.kAnn?.interest || 0))])
+          ])
+        ])
+      ]),
+      // Charts area
+      React.createElement('div', { className: 'grid-2' }, [
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Total balance'),
+          React.createElement('div', { className: 'chart', ref: totalRef })
+        ]),
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Balances by loan'),
+          React.createElement('div', { className: 'chart', ref: balancesRef })
+        ]),
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Monthly cash outflow'),
+          React.createElement('div', { className: 'chart', ref: cashRef })
+        ]),
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Yearly principal vs interest'),
+          React.createElement('div', { className: 'chart', ref: yearlyRef })
+        ]),
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Total payment distribution'),
+          React.createElement('div', { className: 'chart', ref: distRef })
+        ]),
+        React.createElement('div', { className: 'card' }, [
+          React.createElement('h2', null, 'Cumulative payments'),
+          React.createElement('div', { className: 'chart', ref: cumRef })
+        ])
+      ]),
+      // Scenario comparison
+      React.createElement('div', { className: 'card' }, [
+        React.createElement('h2', null, 'Scenario compare'),
+        React.createElement('div', { className: 'btnbar' }, [
+          React.createElement('button', { className: 'secondary', onClick: () => { saveScenario('A'); } }, 'Save as Scenario A'),
+          React.createElement('button', { className: 'secondary', onClick: () => { saveScenario('B'); } }, 'Save as Scenario B'),
+          React.createElement('button', { onClick: overlay }, 'Overlay A vs B on Total'),
+          React.createElement('button', { className: 'secondary', onClick: clearOverlay }, 'Clear overlay')
+        ]),
+        // Render difference table if both scenarios exist
+        renderDiffTable()
+      ]),
+      React.createElement('div', { className: 'footer' }, 'Built for you — fully offline, single file. Tweak away.')
+    ]));
+}
+
+// Render the React app
+ReactDOM.render(React.createElement(MortgageDashboard), document.getElementById('app'));
+</script>
+</body>
+</html>
